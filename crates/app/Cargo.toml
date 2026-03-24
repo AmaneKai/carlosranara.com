@@ -3,8 +3,13 @@ name = "app"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "app"
+path = "src/main.rs"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
 
 [dependencies]
 shared = { path = "../shared" }
