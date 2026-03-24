@@ -7,9 +7,10 @@ use components::{Footer, Header};
 use leptos::*;
 use leptos_router::*;
 use pages::{Contact, Home, LinuxJourney, Projects};
+use wasm_bindgen::prelude::wasm_bindgen;
 
 #[component]
-pub fn App() -> impl IntoView {
+fn App() -> impl IntoView {
     view! {
         <Router>
             <div class="min-h-screen flex flex-col">
@@ -28,7 +29,8 @@ pub fn App() -> impl IntoView {
     }
 }
 
-pub fn mount() {
+#[wasm_bindgen(start)]
+pub fn main() {
     if let Some(window) = web_sys::window() {
         if let Ok(search) = window.location().search() {
             if search.contains("redirect=") {
