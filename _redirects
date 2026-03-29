@@ -1,0 +1,8 @@
+# Serve static files directly, SPA fallback for everything else
+/robots.txt /robots.txt
+/sitemap.xml /sitemap.xml
+/favicon.ico /favicon.ico
+/CV.pdf /CV.pdf
+/gifs/* /gifs/:splat
+/screenshots/* /screenshots/:splat
+/* /index.html 200
