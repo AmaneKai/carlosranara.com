@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::json;
 use shared::{
     fallback::fallback_stats,
-    github::{GitHubLanguage, GitHubStats},
+    github::{GitHubLanguage, GitHubStats, MostStarredRepo},
 };
 use std::collections::{HashMap, HashSet};
 use worker::*;
@@ -22,6 +22,12 @@ struct GraphQLData {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GitHubUser {
+    avatar_url: String,
+    name: Option<String>,
+    bio: Option<String>,
+    created_at: String,
+    followers: FollowerConnection,
+    following: FollowingConnection,
     contributions_collection: ContributionsCollection,
     repositories: RepositoryConnection,
     public_repositories: RepositoryConnection,
@@ -31,12 +37,27 @@ struct GitHubUser {
 #[serde(rename_all = "camelCase")]
 struct ContributionsCollection {
     contribution_calendar: ContributionCalendar,
+    total_commit_contributions: u32,
+    total_pull_request_contributions: u32,
+    total_issue_contributions: u32,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ContributionCalendar {
     total_contributions: u32,
+}
+
+#[derive(Deserialize)]
+struct FollowerConnection {
+    #[serde(rename = "totalCount")]
+    total_count: u32,
+}
+
+#[derive(Deserialize)]
+struct FollowingConnection {
+    #[serde(rename = "totalCount")]
+    total_count: u32,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +68,9 @@ struct RepositoryConnection {
 #[derive(Deserialize)]
 struct Repository {
     name: String,
+    #[serde(rename = "stargazerCount")]
+    stargazer_count: u32,
+    url: String,
     languages: LanguageConnection,
 }
 
@@ -82,8 +106,17 @@ const LANGUAGE_COLORS: &[&str] = &[
 const GRAPHQL_QUERY: &str = "
 query($username: String!) {
   user(login: $username) {
+    avatarUrl
+    name
+    bio
+    createdAt
+    followers { totalCount }
+    following { totalCount }
     contributionsCollection {
       contributionCalendar { totalContributions }
+      totalCommitContributions
+      totalPullRequestContributions
+      totalIssueContributions
     }
     repositories(
       first: 100,
@@ -92,6 +125,8 @@ query($username: String!) {
     ) {
       nodes {
         name
+        stargazerCount
+        url
         languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
           edges { size node { name } }
         }
@@ -104,6 +139,8 @@ query($username: String!) {
     ) {
       nodes {
         name
+        stargazerCount
+        url
         languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
           edges { size node { name } }
         }
@@ -138,7 +175,7 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .query_pairs()
         .find(|(k, _)| k == "username")
         .map(|(_, v)| v.into_owned())
-        .unwrap_or_else(|| "AmaneKai".to_string());
+        .unwrap_or_else(|| "Floranaras".to_string());
 
     let token = match env.secret("GITHUB_TOKEN") {
         Ok(s) => s.to_string(),
@@ -182,8 +219,20 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         .contribution_calendar
         .total_contributions;
 
+    let total_commits = user.contributions_collection.total_commit_contributions;
+    let total_prs = user.contributions_collection.total_pull_request_contributions;
+    let total_issues = user.contributions_collection.total_issue_contributions;
+    let followers = user.followers.total_count;
+    let following = user.following.total_count;
+    let account_created_at = user.created_at.clone();
+    let avatar_url = user.avatar_url.clone();
+    let display_name = user.name.unwrap_or_default();
+    let bio = user.bio.unwrap_or_default();
+
     let mut seen: HashSet<String> = HashSet::new();
     let mut lang_bytes: HashMap<String, u64> = HashMap::new();
+    let mut total_stars: u32 = 0;
+    let mut top_repo: Option<(String, u32, String)> = None;
 
     for repo in user
         .repositories
@@ -194,6 +243,13 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         if !seen.insert(repo.name.clone()) {
             continue;
         }
+        total_stars += repo.stargazer_count;
+        if top_repo
+            .as_ref()
+            .map_or(true, |(_, s, _)| repo.stargazer_count > *s)
+        {
+            top_repo = Some((repo.name.clone(), repo.stargazer_count, repo.url.clone()));
+        }
         for edge in &repo.languages.edges {
             *lang_bytes.entry(edge.node.name.clone()).or_insert(0) += edge.size;
         }
@@ -201,6 +257,12 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
 
     let total_repos = seen.len() as u32;
     let total_bytes: u64 = lang_bytes.values().sum();
+
+    let most_starred_repo = top_repo.map(|(name, stars, url)| MostStarredRepo {
+        name,
+        stars,
+        url,
+    });
 
     let mut lang_list: Vec<(String, u64)> = lang_bytes.into_iter().collect();
     lang_list.sort_by(|a, b| b.1.cmp(&a.1));
@@ -222,6 +284,22 @@ pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         })
         .collect();
 
-    let stats = GitHubStats { total_repos, total_contributions, languages };
+    let stats = GitHubStats {
+        total_repos,
+        total_contributions,
+        total_stars,
+        followers,
+        following,
+        total_commits,
+        total_prs,
+        total_issues,
+        account_created_at,
+        most_starred_repo,
+        avatar_url,
+        display_name,
+        bio,
+        languages,
+    };
+
     cors_headers(Response::from_json(&stats)?)
 }
