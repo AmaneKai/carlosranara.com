@@ -1,305 +1,99 @@
-use serde::Deserialize;
-use serde_json::json;
-use shared::{
-    fallback::fallback_stats,
-    github::{GitHubLanguage, GitHubStats, MostStarredRepo},
-};
-use std::collections::{HashMap, HashSet};
-use worker::*;
+use worker::event;
 
-// ── GitHub GraphQL Types ──────────────────────────────────────────────────────
+mod types;
+mod validation;
+mod rate_limit;
+mod github;
+mod processor;
+mod response;
 
-#[derive(Deserialize)]
-struct GraphQLResponse {
-    data: Option<GraphQLData>,
-}
-
-#[derive(Deserialize)]
-struct GraphQLData {
-    user: GitHubUser,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GitHubUser {
-    avatar_url: String,
-    name: Option<String>,
-    bio: Option<String>,
-    created_at: String,
-    followers: FollowerConnection,
-    following: FollowingConnection,
-    contributions_collection: ContributionsCollection,
-    repositories: RepositoryConnection,
-    public_repositories: RepositoryConnection,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ContributionsCollection {
-    contribution_calendar: ContributionCalendar,
-    total_commit_contributions: u32,
-    total_pull_request_contributions: u32,
-    total_issue_contributions: u32,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ContributionCalendar {
-    total_contributions: u32,
-}
-
-#[derive(Deserialize)]
-struct FollowerConnection {
-    #[serde(rename = "totalCount")]
-    total_count: u32,
-}
-
-#[derive(Deserialize)]
-struct FollowingConnection {
-    #[serde(rename = "totalCount")]
-    total_count: u32,
-}
-
-#[derive(Deserialize)]
-struct RepositoryConnection {
-    nodes: Vec<Repository>,
-}
-
-#[derive(Deserialize)]
-struct Repository {
-    name: String,
-    #[serde(rename = "stargazerCount")]
-    stargazer_count: u32,
-    url: String,
-    languages: LanguageConnection,
-}
-
-#[derive(Deserialize)]
-struct LanguageConnection {
-    edges: Vec<LanguageEdge>,
-}
-
-#[derive(Deserialize)]
-struct LanguageEdge {
-    size: u64,
-    node: LanguageNode,
-}
-
-#[derive(Deserialize)]
-struct LanguageNode {
-    name: String,
-}
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const LANGUAGE_COLORS: &[&str] = &[
-    "rose-pine-foam",
-    "rose-pine-gold",
-    "rose-pine-iris",
-    "rose-pine-rose",
-    "primary",
-    "rose-pine-love",
-    "rose-pine-pine",
-    "rose-pine-subtle",
-];
-
-const GRAPHQL_QUERY: &str = "
-query($username: String!) {
-  user(login: $username) {
-    avatarUrl
-    name
-    bio
-    createdAt
-    followers { totalCount }
-    following { totalCount }
-    contributionsCollection {
-      contributionCalendar { totalContributions }
-      totalCommitContributions
-      totalPullRequestContributions
-      totalIssueContributions
-    }
-    repositories(
-      first: 100,
-      ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
-      privacy: PRIVATE
-    ) {
-      nodes {
-        name
-        stargazerCount
-        url
-        languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
-          edges { size node { name } }
-        }
-      }
-    }
-    publicRepositories: repositories(
-      first: 100,
-      ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER],
-      privacy: PUBLIC
-    ) {
-      nodes {
-        name
-        stargazerCount
-        url
-        languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
-          edges { size node { name } }
-        }
-      }
-    }
-  }
-}";
-
-fn cors_headers(mut response: Response) -> Result<Response> {
-    let headers = response.headers_mut();
-    headers.set("Access-Control-Allow-Origin", "*")?;
-    headers.set("Access-Control-Allow-Methods", "GET")?;
-    headers.set("Content-Type", "application/json")?;
-    headers.set("Cache-Control", "public, max-age=86400")?;
-    Ok(response)
-}
-
-// ── Handler ───────────────────────────────────────────────────────────────────
+use types::{ClientId, RateConfig};
+use rate_limit::Limiter;
+use github::GitHubClient;
+use processor::{build_stats, process_repos};
+use response::{cors_preflight, err, success};
 
 #[event(fetch)]
-pub async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    if req.method() == Method::Options {
-        let mut resp = Response::empty()?;
-        let headers = resp.headers_mut();
-        headers.set("Access-Control-Allow-Origin", "*")?;
-        headers.set("Access-Control-Allow-Methods", "GET, OPTIONS")?;
-        return Ok(resp);
+pub async fn main(
+    req: worker::Request,
+    env: worker::Env,
+    _ctx: worker::Context,
+) -> Result<worker::Response, worker::Error> {
+    if req.method() == worker::Method::Options {
+        return cors_preflight();
+    }
+
+    if req.method() != worker::Method::Get {
+        return err(405, "Method not allowed");
     }
 
     let url = req.url()?;
-    let username = url
+    let raw = url
         .query_pairs()
         .find(|(k, _)| k == "username")
         .map(|(_, v)| v.into_owned())
-        .unwrap_or_else(|| "Floranaras".to_string());
+        .unwrap_or_default();
 
-    let token = match env.secret("GITHUB_TOKEN") {
-        Ok(s) => s.to_string(),
-        Err(_) => return cors_headers(Response::from_json(&fallback_stats())?),
+    let user = match validation::valid_username(&raw) {
+        Some(u) => u,
+        None => return err(400, "Invalid username format"),
     };
+
+    let kv = env.kv("RATE_LIMIT_KV").ok();
+    let token = env
+        .secret("GITHUB_TOKEN")
+        .map(|s| s.to_string())
+        .unwrap_or_default();
 
     if token.is_empty() {
-        return cors_headers(Response::from_json(&fallback_stats())?);
+        return err(500, "Server configuration error");
     }
 
-    let body = json!({
-        "query": GRAPHQL_QUERY,
-        "variables": { "username": username }
-    });
+    let client = ClientId::from_req(&req);
 
-    let mut init = RequestInit::new();
-    init.with_method(Method::Post)
-        .with_body(Some(body.to_string().into()));
+    if let Some(ref kv_store) = kv {
+        let limiter = Limiter::new(kv_store);
 
-    let headers = Headers::new();
-    headers.set("Authorization", &format!("Bearer {token}"))?;
-    headers.set("Content-Type", "application/json")?;
-    headers.set("User-Agent", "portfolio-worker/1.0")?;
-    init.with_headers(headers);
+        if limiter.check_global(&client).await? {
+            return err(429, "Too many requests. Slow down.");
+        }
 
-    let gh_req = Request::new_with_init("https://api.github.com/graphql", &init)?;
-    let mut gh_resp = Fetch::Request(gh_req).send().await?;
+        let cfg = RateConfig::default();
+        if !limiter.check(&client, &user, cfg).await? {
+            return err(429, "Rate limit exceeded. Try again in 5 minutes.");
+        }
+    }
 
-    let gql: GraphQLResponse = match gh_resp.json().await {
-        Ok(d) => d,
-        Err(_) => return cors_headers(Response::from_json(&fallback_stats())?),
+    let gh = GitHubClient::new(token);
+    let gql = match gh.fetch(&user).await {
+        Ok(r) => r,
+        Err(e) => {
+            worker::console_log!("GitHub error: {:?}", e);
+            let msg = e.to_string();
+            let code = if msg.contains("rate limit") { 503 } else { 502 };
+            return err(code, &msg);
+        }
     };
 
-    let user = match gql.data {
+    let gql_user = match gql.data {
         Some(d) => d.user,
-        None => return cors_headers(Response::from_json(&fallback_stats())?),
+        None => return err(404, "User not found"),
     };
 
-    let total_contributions = user
+    let contributed: Vec<_> = gql_user
         .contributions_collection
-        .contribution_calendar
-        .total_contributions;
-
-    let total_commits = user.contributions_collection.total_commit_contributions;
-    let total_prs = user.contributions_collection.total_pull_request_contributions;
-    let total_issues = user.contributions_collection.total_issue_contributions;
-    let followers = user.followers.total_count;
-    let following = user.following.total_count;
-    let account_created_at = user.created_at.clone();
-    let avatar_url = user.avatar_url.clone();
-    let display_name = user.name.unwrap_or_default();
-    let bio = user.bio.unwrap_or_default();
-
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut lang_bytes: HashMap<String, u64> = HashMap::new();
-    let mut total_stars: u32 = 0;
-    let mut top_repo: Option<(String, u32, String)> = None;
-
-    for repo in user
-        .repositories
-        .nodes
+        .commit_contributions_by_repository
         .iter()
-        .chain(user.public_repositories.nodes.iter())
-    {
-        if !seen.insert(repo.name.clone()) {
-            continue;
-        }
-        total_stars += repo.stargazer_count;
-        if top_repo
-            .as_ref()
-            .map_or(true, |(_, s, _)| repo.stargazer_count > *s)
-        {
-            top_repo = Some((repo.name.clone(), repo.stargazer_count, repo.url.clone()));
-        }
-        for edge in &repo.languages.edges {
-            *lang_bytes.entry(edge.node.name.clone()).or_insert(0) += edge.size;
-        }
-    }
-
-    let total_repos = seen.len() as u32;
-    let total_bytes: u64 = lang_bytes.values().sum();
-
-    let most_starred_repo = top_repo.map(|(name, stars, url)| MostStarredRepo {
-        name,
-        stars,
-        url,
-    });
-
-    let mut lang_list: Vec<(String, u64)> = lang_bytes.into_iter().collect();
-    lang_list.sort_by(|a, b| b.1.cmp(&a.1));
-
-    let languages: Vec<GitHubLanguage> = lang_list
-        .into_iter()
-        .filter_map(|(name, bytes)| {
-            let pct = ((bytes as f64 / total_bytes as f64) * 100.0).round() as u32;
-            if pct == 0 {
-                return None;
-            }
-            Some((name, pct))
-        })
-        .enumerate()
-        .map(|(i, (name, percentage))| GitHubLanguage {
-            name,
-            percentage,
-            color: LANGUAGE_COLORS[i % LANGUAGE_COLORS.len()].into(),
-        })
+        .map(|c| c.repository.clone())
         .collect();
 
-    let stats = GitHubStats {
-        total_repos,
-        total_contributions,
-        total_stars,
-        followers,
-        following,
-        total_commits,
-        total_prs,
-        total_issues,
-        account_created_at,
-        most_starred_repo,
-        avatar_url,
-        display_name,
-        bio,
-        languages,
-    };
+    let (repo_cnt, stars, langs, top) = process_repos(
+        &gql_user.repositories.nodes,
+        &gql_user.public_repositories.nodes,
+        &contributed,
+    );
 
-    cors_headers(Response::from_json(&stats)?)
+    let stats = build_stats(gql_user, user.as_str(), repo_cnt, stars, langs, top);
+
+    success(stats)
 }

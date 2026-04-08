@@ -2,6 +2,7 @@ use crate::config::{GITHUB_USERNAME, WORKER_URL};
 use gloo_net::http::Request;
 use leptos::*;
 use shared::github::GitHubStats;
+use serde::Deserialize;
 
 fn format_number(n: u32) -> String {
     if n >= 1_000 {
@@ -25,6 +26,11 @@ fn lang_color_class(color: &str) -> &'static str {
     }
 }
 
+#[derive(Deserialize)]
+struct WorkerResponse {
+    data: GitHubStats,
+}
+
 #[component]
 pub fn AboutSection() -> impl IntoView {
     let stats: RwSignal<Option<GitHubStats>> = create_rw_signal(None);
@@ -35,10 +41,10 @@ pub fn AboutSection() -> impl IntoView {
             let Ok(resp) = Request::get(&url).send().await else {
                 return;
             };
-            let Ok(data) = resp.json::<GitHubStats>().await else {
+            let Ok(wrapped) = resp.json::<WorkerResponse>().await else {
                 return;
             };
-            stats.set(Some(data));
+            stats.set(Some(wrapped.data));
         });
     });
 
