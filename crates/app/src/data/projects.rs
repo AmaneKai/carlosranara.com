@@ -5,6 +5,7 @@ pub enum Category {
     Games,
     Tui,
     Tools,
+    Web,
 }
 
 impl Category {
@@ -15,6 +16,7 @@ impl Category {
             Category::Games => "GAMES",
             Category::Tui => "TUI",
             Category::Tools => "TOOLS",
+            Category::Web => "WEB",
         }
     }
 
@@ -25,6 +27,7 @@ impl Category {
             Category::Games,
             Category::Tui,
             Category::Tools,
+            Category::Web,
         ]
     }
 }
@@ -107,6 +110,32 @@ pub fn all_projects() -> Vec<Project> {
             github_url: "https://github.com/AmaneKai/funnyvalentine",
             featured: true,
             thumbnail: Some("/public/gifs/valentines.webm"),
+            stars: None,
+        },
+        Project {
+            title: "ghfetch",
+            description: "A GitHub stats API built with Rust on Cloudflare Workers. \
+                Returns aggregated repository and contribution data for any GitHub \
+                user via a single HTTP request.",
+            category: Category::Web,
+            tags: &["Rust", "Workers", "API", "GitHub"],
+            language: "Rust",
+            github_url: "https://github.com/AmaneKai/ghfetch",
+            featured: false,
+            thumbnail: None,
+            stars: None,
+        },
+         Project {
+            title: "GitPeek",
+            description: "A web application for viewing public GitHub profile statistics. \
+                Enter any GitHub username and get an instant overview of their activity, \
+                languages, repositories, and contribution history.",
+            category: Category::Web,
+            tags: &["Rust", "Workers", "API", "GitHub"],
+            language: "Rust",
+            github_url: "https://github.com/AmaneKai/GitPeek",
+            featured: true,
+            thumbnail: Some("/public/screenshots/gitpeek.webp"),
             stars: None,
         },
         Project {
