@@ -80,7 +80,7 @@ pub fn LinuxJourney() -> impl IntoView {
 #[component]
 fn TimelineCard(item: crate::data::TimelineItem, index: usize) -> impl IntoView {
     let (expanded, set_expanded) = create_signal(false);
-    let is_left = index % 2 == 0;
+    let is_left = index.is_multiple_of(2);
 
     let row_class = if is_left {
         "relative flex items-center md:flex-row animate-fade-in-up"

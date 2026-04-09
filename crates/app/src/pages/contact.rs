@@ -14,7 +14,7 @@ pub fn Contact() -> impl IntoView {
             set_current_time.set(format!("{:02}:{:02}:{:02}", h, m, s));
         };
         update_time();
-        let interval = gloo_timers::callback::Interval::new(1000, move || update_time());
+        let interval = gloo_timers::callback::Interval::new(1000, update_time);
         interval.forget();
     });
 
