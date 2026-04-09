@@ -106,8 +106,8 @@ pub fn timeline() -> Vec<TimelineItem> {
         },
         TimelineItem {
             date: "2026",
-            title: "Fedora: Pragmatism",
-            description: "Current setup. Moved to Fedora for stability and pragmatism. Still \
+            title: "Arch: Pragmatism",
+            description: "Current setup. Moved to Arch KDE Plasma for stability and pragmatism. Still \
                 Arch at heart, but sometimes you need things to just work.",
             learnings: Some(
                 "Maturity means knowing when to choose stability over bleeding edge.",
